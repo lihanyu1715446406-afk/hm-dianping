@@ -4,16 +4,21 @@ import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
+import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
+import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
@@ -33,12 +38,51 @@ import java.util.stream.Collectors;
  * @author 虎哥
  * @since 2021-12-22
  */
+@Slf4j
 @Service
 public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
+
+    private static final int FEED_PAGE_SIZE = SystemConstants.DEFAULT_PAGE_SIZE;
+
     @Resource
     private IUserService userService;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private IFollowService followService;
+
+    @Override
+    public Result saveBlog(Blog blog) {
+        Long userId = UserHolder.getUser().getId();
+        blog.setUserId(userId);
+
+        // 1. 先落库，失败直接返回
+        boolean saved = save(blog);
+        if (!saved) {
+            return Result.fail("发布笔记失败");
+        }
+
+        // 2. 查询作者的所有粉丝：tb_follow.follow_user_id = 作者
+        List<Follow> followers = followService.query()
+                .eq("follow_user_id", userId)
+                .list();
+
+        // 3. 一条笔记给所有粉丝使用同一个时间戳，写入各自的收件箱
+        long now = System.currentTimeMillis();
+        String blogId = blog.getId().toString();
+        for (Follow follower : followers) {
+            String key = RedisConstants.FEED_KEY + follower.getUserId();
+            try {
+                stringRedisTemplate.opsForZSet().add(key, blogId, now);
+            } catch (Exception e) {
+                // 尽力而为：Redis 失败不影响已经成功的数据库写入
+                log.warn("feed push failed, followerId={}, blogId={}",
+                        follower.getUserId(), blog.getId(), e);
+            }
+        }
+        return Result.ok(blog.getId());
+    }
+
     @Override
     public Result queryHotBlog(Integer current){
         //根据用户查询
@@ -141,6 +185,67 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             }
         }
         return Result.ok(users);
+    }
+
+    @Override
+    public Result queryBlogOfFollow(Long max, Integer offset) {
+        Long userId = UserHolder.getUser().getId();
+        String key = RedisConstants.FEED_KEY + userId;
+
+        long maxScore = (max == null) ? System.currentTimeMillis() : max;
+        int start = (offset == null || offset < 0) ? 0 : offset;
+
+        // ZREVRANGEBYSCORE feed:{userId} maxScore 0 LIMIT start 5
+        Set<ZSetOperations.TypedTuple<String>> tuples = stringRedisTemplate.opsForZSet()
+                .reverseRangeByScoreWithScores(key, 0, maxScore, start, FEED_PAGE_SIZE);
+
+        // 空收件箱也要返回非 null 的 ScrollResult
+        if (tuples == null || tuples.isEmpty()) {
+            ScrollResult empty = new ScrollResult();
+            empty.setList(Collections.emptyList());
+            empty.setMinTime(maxScore);
+            empty.setOffset(start);
+            return Result.ok(empty);
+        }
+
+        List<Long> ids = new ArrayList<>(tuples.size());
+        long minTime = 0L;
+        int sameScoreCount = 0;
+        for (ZSetOperations.TypedTuple<String> tuple : tuples) {
+            ids.add(Long.valueOf(tuple.getValue()));
+            long score = tuple.getScore().longValue();
+            if (score == minTime) {
+                sameScoreCount++;
+            } else {
+                minTime = score;
+                sameScoreCount = 1;
+            }
+        }
+
+        // 下一页游标：边界分数相同则累加已消费条数，否则重置为当前分数段条数
+        int nextOffset = (minTime == maxScore)
+                ? start + sameScoreCount
+                : sameScoreCount;
+
+        // listByIds 不保证顺序，按 ZSet 的 ids 顺序重建
+        Map<Long, Blog> blogMap = listByIds(ids).stream()
+                .collect(Collectors.toMap(Blog::getId, Function.identity()));
+        List<Blog> blogs = new ArrayList<>(ids.size());
+        for (Long id : ids) {
+            Blog blog = blogMap.get(id);
+            if (blog == null) {
+                continue; // 数据库已删除但收件箱还有，跳过
+            }
+            queryBlogUser(blog);
+            isBlogLiked(blog);
+            blogs.add(blog);
+        }
+
+        ScrollResult result = new ScrollResult();
+        result.setList(blogs);
+        result.setMinTime(minTime);
+        result.setOffset(nextOffset);
+        return Result.ok(result);
     }
 
     private void queryBlogUser(Blog blog) {
