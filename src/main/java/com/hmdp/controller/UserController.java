@@ -69,6 +69,22 @@ public class UserController {
         return Result.ok(user);
     }
 
+    /**
+     * 用户签到（同一天重复调用幂等）
+     */
+    @PostMapping("/sign")
+    public Result sign() {
+        return userService.sign();
+    }
+
+    /**
+     * 查询本月截至今天的连续签到天数
+     */
+    @GetMapping("/sign/count")
+    public Result signCount() {
+        return userService.signCount();
+    }
+
     @GetMapping("/info/{id}")
     public Result info(@PathVariable("id") Long userId){
         // 查询详情

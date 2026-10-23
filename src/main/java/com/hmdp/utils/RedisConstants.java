@@ -23,4 +23,6 @@ public class RedisConstants {
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";
     public static final String USER_SIGN_KEY = "sign:";
+    // 店铺UV统计。key = uv:{shopId}，value 是 HyperLogLog，记录访问过的用户id
+    public static final String UV_KEY = "uv:";
 }

@@ -7,6 +7,7 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
@@ -14,6 +15,7 @@ import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisData;
 import com.hmdp.utils.SystemConstants;
+import com.hmdp.utils.UserHolder;
 import org.springframework.data.geo.Circle;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
@@ -74,8 +76,19 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         if (shop == null) {
             return Result.fail("店铺不存在!");
         }
+        //记录UV：登录用户访问店铺详情时，把userId加入该店铺的HyperLogLog
+        recordShopUv(id);
         //返回
         return Result.ok(shop);
+    }
+
+    private void recordShopUv(Long shopId) {
+        UserDTO user = UserHolder.getUser();
+        if (user == null) {
+            //游客访问不计入UV
+            return;
+        }
+        stringRedisTemplate.opsForHyperLogLog().add(UV_KEY + shopId, user.getId().toString());
     }
 
     public static final ExecutorService CACHE_REBUILD_EXECUTOR= Executors.newFixedThreadPool(10);
