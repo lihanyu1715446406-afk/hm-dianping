@@ -20,5 +20,10 @@ class HmDianPingApplicationTests {
         shopService.saveShop2Redis(1L,10L);
     }
 
+    @Test
+    void testLoadShopGeoData(){
+        shopService.loadShopGeoData();
+    }
+
 
 }
